@@ -37,6 +37,7 @@ impl PageManager {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
+            .truncate(false)
             .create(true)
             .open(path)?;
         Ok(Self { file, page_size })
