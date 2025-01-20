@@ -4,3 +4,5 @@ debug/
 *.pdb
 .direnv
 .devenv
+
+*.tmp
