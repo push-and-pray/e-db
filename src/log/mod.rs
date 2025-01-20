@@ -71,8 +71,6 @@ impl LogManager {
     }
 
     pub fn append(&mut self, data: &[u8]) -> Result<(), io::Error> {
-        println!("{}", self.latest_lsn);
-        println!("{}", self.latest_flushed_lsn);
         let mut offset = self.tail.get_offset() as usize;
         let freespace = offset - size_of::<u16>();
 
@@ -100,12 +98,118 @@ impl LogManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    const PAGESIZE: usize = 64;
+    use pretty_assertions::assert_eq;
+    use tempfile::tempdir;
+    const PAGESIZE: usize = 8;
 
     #[test]
     fn offset_setter_getter() {
         let mut page = Page::new(0, PAGESIZE);
         page.set_offset(PAGESIZE);
-        assert_eq!(page.get_offset(), 64);
+        assert_eq!(page.get_offset(), PAGESIZE as u16);
+    }
+
+    #[test]
+    fn init_empty_file() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("logfile.bin");
+        let manager = LogManager::new(file_path.to_str().unwrap(), PAGESIZE).unwrap();
+
+        assert_eq!(manager.tail.position, 0);
+        assert_eq!(manager.tail.get_offset(), PAGESIZE as u16);
+        assert_eq!(manager.latest_lsn, 0);
+        assert_eq!(manager.latest_flushed_lsn, 0);
+    }
+
+    #[test]
+    fn single_write() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("logfile.bin");
+        let mut lm = LogManager::new(file_path.to_str().unwrap(), PAGESIZE).unwrap();
+
+        let log_data = b"A";
+        lm.append(log_data).unwrap();
+        assert_eq!(lm.tail.read(), &vec![0, 7, 0, 0, 0, 0, 0, 65]);
+        lm.flush().unwrap();
+        assert_eq!(lm.tail.read(), &vec![0, 7, 0, 0, 0, 0, 0, 65]);
+
+        let data = lm.log.read_page(0).unwrap();
+        assert_eq!(data.read(), &vec![0, 7, 0, 0, 0, 0, 0, 65]);
+    }
+
+    #[test]
+    fn multiple_writes() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("logfile.bin");
+        let mut lm = LogManager::new(file_path.to_str().unwrap(), PAGESIZE).unwrap();
+
+        lm.append(b"A").unwrap();
+        lm.append(b"B").unwrap();
+        lm.append(b"C").unwrap();
+
+        assert_eq!(lm.tail.read(), &vec![0, 5, 0, 0, 0, 67, 66, 65]);
+        lm.flush().unwrap();
+        assert_eq!(lm.tail.read(), &vec![0, 5, 0, 0, 0, 67, 66, 65]);
+        let data = lm.log.read_page(0).unwrap();
+        assert_eq!(data.read(), &vec![0, 5, 0, 0, 0, 67, 66, 65]);
+    }
+
+    #[test]
+    fn rollback() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("logfile.bin");
+        let mut lm = LogManager::new(file_path.to_str().unwrap(), PAGESIZE).unwrap();
+
+        lm.append(b"AA").unwrap();
+        lm.append(b"BB").unwrap();
+        lm.append(b"CC").unwrap();
+        lm.append(b"D").unwrap();
+
+        assert_eq!(lm.tail.read(), &vec![0, 7, 0, 0, 0, 0, 0, 68]);
+
+        let data = lm.log.read_page(0).unwrap();
+        assert_eq!(data.read(), &vec![0, 2, 67, 67, 66, 66, 65, 65]);
+    }
+
+    #[test]
+    fn init_non_empty_file() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("logfile.bin");
+        let mut lm_old = LogManager::new(file_path.to_str().unwrap(), PAGESIZE).unwrap();
+
+        lm_old.append(b"AA").unwrap();
+        lm_old.append(b"BB").unwrap();
+        lm_old.append(b"CC").unwrap();
+        lm_old.append(b"D").unwrap();
+        lm_old.flush().unwrap();
+
+        let lm_new = LogManager::new(file_path.to_str().unwrap(), PAGESIZE).unwrap();
+        assert_eq!(lm_new.tail.read(), &vec![0, 7, 0, 0, 0, 0, 0, 68]);
+        assert_eq!(lm_new.tail.position, 1);
+    }
+
+    #[test]
+    fn valid_append_input_size() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("logfile.bin");
+        let mut lm_old = LogManager::new(file_path.to_str().unwrap(), PAGESIZE).unwrap();
+
+        assert!(lm_old.append(&[65; PAGESIZE - 1]).is_err());
+        assert!(lm_old.append(&[65; PAGESIZE - 2]).is_ok());
+    }
+
+    #[test]
+    fn append_exact_allowed_size() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("logfile.bin");
+        let mut lm = LogManager::new(file_path.to_str().unwrap(), PAGESIZE).unwrap();
+
+        lm.append(b"AAAAAA").unwrap();
+        assert_eq!(lm.tail.read(), &vec![0, 2, 65, 65, 65, 65, 65, 65]);
+
+        lm.append(b"BBBBBB").unwrap();
+        assert_eq!(lm.tail.read(), &vec![0, 2, 66, 66, 66, 66, 66, 66]);
+        let data = lm.log.read_page(0).unwrap();
+        assert_eq!(data.read(), &vec![0, 2, 65, 65, 65, 65, 65, 65]);
     }
 }
